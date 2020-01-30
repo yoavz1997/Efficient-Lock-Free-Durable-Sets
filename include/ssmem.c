@@ -54,6 +54,7 @@ ssmem_get_id()
 }
 
 static ssmem_list_t *ssmem_list_node_new(void *mem, ssmem_list_t *next);
+static void ssmem_zero_memory(ssmem_allocator_t *a);
 
 /* 
  * explicitely subscribe to the list of threads in order to used timestamps for GC
@@ -99,16 +100,18 @@ void ssmem_alloc_init_fs_size(ssmem_allocator_t *a, size_t size, size_t free_set
 	a->mem = (void *)aligned_alloc(CACHE_LINE_SIZE, size);
 #endif
 	assert(a->mem != nullptr);
-#if SSMEM_ZERO_MEMORY == 1
-	memset(a->mem, 0, size);
-#endif
 
 	a->mem_curr = 0;
 	a->mem_size = size;
 	a->tot_size = size;
 	a->fs_size = free_set_size;
 
-	a->mem_chunks = ssmem_list_node_new(a->mem, nullptr);
+	ssmem_zero_memory(a);
+
+	struct ssmem_list* new_mem_chunks = ssmem_list_node_new(a->mem, nullptr);
+	BARRIER(new_mem_chunks);
+
+	a->mem_chunks = new_mem_chunks;
 	BARRIER(&a->mem_chunks);
 	ssmem_gc_thread_init(a, id);
 
@@ -145,7 +148,6 @@ ssmem_list_node_new(void *mem, ssmem_list_t *next)
 	assert(mc != nullptr);
 	mc->obj = mem;
 	mc->next = next;
-	BARRIER(mc);
 	return mc;
 }
 
@@ -443,15 +445,17 @@ ssmem_alloc(ssmem_allocator_t *a, size_t size)
 			a->mem = (void *)aligned_alloc(CACHE_LINE_SIZE, a->mem_size);
 #endif
 			assert(a->mem != nullptr);
-#if SSMEM_ZERO_MEMORY == 1
-			memset(a->mem, 0, a->mem_size);
-#endif
 
 			a->mem_curr = 0;
 
 			a->tot_size += a->mem_size;
 
-			a->mem_chunks = ssmem_list_node_new(a->mem, a->mem_chunks);
+			ssmem_zero_memory(a);
+
+			struct ssmem_list* new_mem_chunks = ssmem_list_node_new(a->mem, a->mem_chunks);
+			BARRIER(new_mem_chunks);
+
+			a->mem_chunks = new_mem_chunks;
 			BARRIER(&a->mem_chunks);
 		}
 
@@ -713,4 +717,13 @@ void ssmem_ts_list_print()
 	}
 
 	printf("nullptr\n");
+}
+
+void ssmem_zero_memory(ssmem_allocator_t *a) {
+#if SSMEM_ZERO_MEMORY == 1
+	memset(a->mem, 0, a->mem_size);
+	for (size_t i = 0; i < a->mem_size / CACHE_LINE_SIZE; i += CACHE_LINE_SIZE) {
+		BARRIER((int8_t*)a->mem + i); // An asynchronous flush would be sufficient here, since another BARRIER will be placed next, after creating a new node for the mem_chunks list
+	}
+#endif
 }
